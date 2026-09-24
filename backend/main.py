@@ -37,20 +37,22 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-app.mount("/static", StaticFiles(directory=settings.raw_path.parent.parent / "static"), name="static")
+app.mount("/static", StaticFiles(directory=settings.static_path), name="static")
 
 
 @app.get("/", include_in_schema=False)
 def index():
-    return FileResponse(settings.raw_path.parent.parent / "static" / "index.html")
+    return FileResponse(settings.static_path / "index.html")
 
 
 @app.get("/api/health")
 def health(session: Session = Depends(get_db)):
+    transcript_count = session.scalar(select(func.count(Transcript.id))) or 0
     return {
         "status": "ok",
         "service": "Expert Call Intelligence",
-        "database": session.scalar(select(func.count(Transcript.id))) is not None,
+        "database": "ready",
+        "transcripts": transcript_count,
     }
 
 

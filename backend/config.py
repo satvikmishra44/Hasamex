@@ -28,6 +28,7 @@ class Settings:
     database_path: Path = DATABASE_PATH
     chroma_path: Path = CHROMA_DIR
     raw_path: Path = RAW_DIR
+    static_path: Path = STATIC_DIR
 
 
 settings = Settings()
@@ -35,3 +36,4 @@ settings = Settings()
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 RAW_DIR.mkdir(parents=True, exist_ok=True)
 CHROMA_DIR.mkdir(parents=True, exist_ok=True)
+STATIC_DIR.mkdir(parents=True, exist_ok=True)
