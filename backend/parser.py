@@ -2,13 +2,16 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-MARKET_CODES = {
-    "France": "FR",
-    "Germany": "DE",
-    "United Kingdom": "UK",
-}
-
 TIMESTAMP_RE = re.compile(r"^\d{2}:\d{2}$")
+
+
+@dataclass(frozen=True)
+class ValidationResult:
+    valid: bool
+    reason: str | None
+    market_name: str | None = None
+    market_code: str | None = None
+    expert_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -35,6 +38,95 @@ class ParsedTranscript:
     turns: list[ParsedTurn]
 
 
+def derive_market_code(market_name: str) -> str:
+    predefined = {
+        "France": "FR",
+        "Germany": "DE",
+        "United Kingdom": "UK",
+        "Italy": "IT",
+        "Spain": "ES",
+        "Netherlands": "NL",
+        "Belgium": "BE",
+        "Switzerland": "CH",
+        "Austria": "AT",
+        "Denmark": "DK",
+        "Sweden": "SE",
+        "Norway": "NO",
+        "Portugal": "PT",
+    }
+    if market_name in predefined:
+        return predefined[market_name]
+
+    words = [word for word in re.findall(r"[A-Za-z]+", market_name) if word]
+    if len(words) >= 2:
+        return (words[0][0] + words[1][0]).upper()
+    if words:
+        return words[0][:2].upper()
+    raise ValueError("Unable to derive market code from market name.")
+
+
+def validate_transcript_format(path: str | Path) -> ValidationResult:
+    source_path = Path(path)
+    raw_text = source_path.read_text(encoding="utf-8")
+
+    if not raw_text.strip():
+        return ValidationResult(valid=False, reason="File is empty.")
+
+    lines = raw_text.splitlines()
+    expert_line = next((line for line in lines if line.startswith("Expert ")), None)
+    role_line = next((line for line in lines if line.startswith("Role:")), None)
+    market_line = next((line for line in lines if line.startswith("Market:")), None)
+
+    if not expert_line:
+        return ValidationResult(valid=False, reason="Missing expert metadata line.")
+    if not role_line:
+        return ValidationResult(valid=False, reason="Missing role metadata line.")
+    if not market_line:
+        return ValidationResult(valid=False, reason="Missing market metadata line.")
+    if "–" not in expert_line:
+        return ValidationResult(
+            valid=False,
+            reason="Expert metadata must use 'Expert X – Name' format.",
+        )
+
+    market_name = market_line.split(":", 1)[1].strip()
+    expert_name = expert_line.split("–", 1)[1].strip()
+
+    try:
+        market_code = derive_market_code(market_name)
+    except Exception:
+        return ValidationResult(
+            valid=False,
+            reason="Could not derive market code from market name.",
+        )
+
+    timestamps = [line.strip() for line in lines if TIMESTAMP_RE.fullmatch(line.strip())]
+    if not timestamps:
+        return ValidationResult(valid=False, reason="No timestamp blocks found.")
+
+    if not any("Interviewer:" in line for line in lines):
+        return ValidationResult(valid=False, reason="No interviewer turns found.")
+
+    expert_answer_found = False
+    for index, line in enumerate(lines):
+        if TIMESTAMP_RE.fullmatch(line.strip()) and index + 1 < len(lines):
+            next_line = lines[index + 1].strip()
+            if ":" in next_line and not next_line.startswith("Interviewer:"):
+                expert_answer_found = True
+                break
+
+    if not expert_answer_found:
+        return ValidationResult(valid=False, reason="No expert-answer turns found.")
+
+    return ValidationResult(
+        valid=True,
+        reason=None,
+        market_name=market_name,
+        market_code=market_code,
+        expert_name=expert_name,
+    )
+
+
 def parse_transcript(path: str | Path) -> ParsedTranscript:
     source_path = Path(path)
     raw_text = source_path.read_text(encoding="utf-8")
@@ -53,10 +145,7 @@ def parse_transcript(path: str | Path) -> ParsedTranscript:
     expert_name = expert_line.split("–", 1)[1].strip()
     expert_role = role_line.split(":", 1)[1].strip()
     market_name = market_line.split(":", 1)[1].strip()
-    market_code = MARKET_CODES.get(market_name)
-
-    if not market_code:
-        raise ValueError(f"Unsupported market '{market_name}' in {source_path.name}")
+    market_code = derive_market_code(market_name)
 
     is_incomplete = "IMPORTANT METADATA NOTE:" in raw_text
     turns: list[ParsedTurn] = []

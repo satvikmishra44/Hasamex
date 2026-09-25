@@ -88,8 +88,20 @@ class TranscriptDetail(TranscriptSummary):
     turns: list[TurnResponse]
 
 
+class RawFileCheck(BaseModel):
+    filename: str
+    valid: bool
+    reason: str | None = None
+    market_name: str | None = None
+    market_code: str | None = None
+    expert_name: str | None = None
+
+
 class IngestionResponse(BaseModel):
     status: str
+    files_discovered: int
+    valid_files: int
+    invalid_files: int
     files_read: int
     transcripts_created: int
     transcripts_updated: int
@@ -97,11 +109,16 @@ class IngestionResponse(BaseModel):
     vector_records_created: int
     vector_records_synchronized: int
     incomplete_transcripts: int
+    raw_corpus_fingerprint: str | None = None
+    skipped: bool = False
+    raw_file_checks: list[RawFileCheck] = []
     message: str
 
 
 class SystemStatus(BaseModel):
     raw_files_detected: int
+    valid_raw_files: int
+    invalid_raw_files: int
     calls_parsed: int
     expert_chunks_indexed: int
     sqlite_path: str
@@ -113,3 +130,6 @@ class SystemStatus(BaseModel):
     gemini_model: str
     last_ingestion_time: str | None
     incomplete_transcripts: int
+    raw_corpus_fingerprint: str | None = None
+    last_ingestion_skipped: bool = False
+    raw_file_checks: list[RawFileCheck] = []

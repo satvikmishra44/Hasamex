@@ -1,237 +1,212 @@
+import hashlib
+import json
+from collections import defaultdict
+
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from backend.citation_service import get_citations
+from backend.citation_service import citation_from_record
 from backend.gemini_service import generate_grounded_answer
+from backend.models import GeneratedAnalysis, Transcript
 from backend.retrieval import HybridRetriever
 
-GUIDE = [
-    {
-        "number": 1,
-        "question": "How would you describe current adoption of robotic surgery in your market?",
-        "answers": {
-            "FR": {
-                "summary": "Adoption is growing but remains concentrated in larger academic hospitals and better-funded private centres.",
-                "coverage": "sufficient",
-                "ids": ["FR-00:18"],
-            },
-            "DE": {
-                "summary": "Adoption is growing unevenly, with university hospitals ahead of smaller hospitals.",
-                "coverage": "sufficient",
-                "ids": ["DE-00:16"],
-            },
-            "UK": {
-                "summary": "Adoption is increasing, with robotic surgery becoming standard for selected procedures in some larger NHS trusts, while access varies.",
-                "coverage": "sufficient",
-                "ids": ["UK-00:14"],
-            },
-        },
-    },
-    {
-        "number": 2,
-        "question": "What are the main barriers to adoption?",
-        "answers": {
-            "FR": {
-                "summary": "Capital budget approval is the primary barrier, and purchasing committees require a strong economic case.",
-                "coverage": "sufficient",
-                "ids": ["FR-01:20"],
-            },
-            "DE": {
-                "summary": "Large capital cost and uncertainty about sufficient system utilization are the main barriers.",
-                "coverage": "sufficient",
-                "ids": ["DE-01:10"],
-            },
-            "UK": {
-                "summary": "Funding and training capacity are both important; adoption can stall without enough trained surgeons and theatre staff.",
-                "coverage": "sufficient",
-                "ids": ["UK-01:05"],
-            },
-        },
-    },
-    {
-        "number": 3,
-        "question": "How important are hospital budgets and ROI in purchasing decisions?",
-        "answers": {
-            "FR": {
-                "summary": "ROI is very important. Finance teams examine utilization, procedure volume, maintenance cost, and payback, especially when clinical outcomes are similar.",
-                "coverage": "sufficient",
-                "ids": ["FR-02:18", "FR-04:08"],
-            },
-            "DE": {
-                "summary": "Procurement evaluates total ownership cost, procedure volume, maintenance, service, and training; the economic case determines approval.",
-                "coverage": "sufficient",
-                "ids": ["DE-02:08"],
-            },
-            "UK": {
-                "summary": "ROI matters, but hospitals balance economics with patient outcomes, length of stay, recruitment, and clinical strategy.",
-                "coverage": "sufficient",
-                "ids": ["UK-02:07", "UK-03:10"],
-            },
-        },
-    },
-    {
-        "number": 4,
-        "question": "How important are surgeon training and clinical outcomes?",
-        "answers": {
-            "FR": {
-                "summary": "Training multiple surgeons supports utilization and economics. Clinical outcomes are necessary but not sufficient on their own.",
-                "coverage": "sufficient",
-                "ids": ["FR-03:10", "FR-04:08"],
-            },
-            "DE": {
-                "summary": "Training is operationally important because reliance on one comfortable surgeon weakens utilization and the business case.",
-                "coverage": "sufficient",
-                "ids": ["DE-03:05"],
-            },
-            "UK": {
-                "summary": "Training capacity is as important as funding because both surgeons and theatre staff must be trained for adoption to progress.",
-                "coverage": "sufficient",
-                "ids": ["UK-01:05"],
-            },
-        },
-    },
-    {
-        "number": 5,
-        "question": "What adoption trend do you expect over the next 3–5 years?",
-        "answers": {
-            "FR": {
-                "summary": "The expert expects continued, steady rather than explosive adoption, with smaller hospitals remaining slower.",
-                "coverage": "sufficient",
-                "ids": ["FR-05:07"],
-            },
-            "DE": {
-                "summary": "The supplied evidence indicates gradual rather than dramatic growth, but the source ends mid-sentence.",
-                "coverage": "partial",
-                "ids": ["DE-04:09"],
-            },
-            "UK": {
-                "summary": "The expert is positive and says adoption could accelerate if training expands, but the source ends mid-sentence.",
-                "coverage": "partial",
-                "ids": ["UK-04:06"],
-            },
-        },
-    },
-    {
-        "number": 6,
-        "question": "What is the typical hospital decision-making timeline for purchasing a new robotic system?",
-        "answers": {
-            "FR": {
-                "summary": "Six to twelve months is realistic once a hospital becomes serious, with possible delay into a later budget cycle.",
-                "coverage": "sufficient",
-                "ids": ["FR-06:08"],
-            },
-            "DE": {
-                "summary": "No evidence for this question in the supplied Germany call.",
-                "coverage": "insufficient",
-                "ids": [],
-            },
-            "UK": {
-                "summary": "No evidence for this question in the supplied United Kingdom call.",
-                "coverage": "insufficient",
-                "ids": [],
-            },
-        },
-    },
+GUIDE_QUESTIONS = [
+    "How would you describe current adoption of robotic surgery in your market?",
+    "What are the main barriers to adoption?",
+    "How important are hospital budgets and ROI in purchasing decisions?",
+    "How important are surgeon training and clinical outcomes?",
+    "What adoption trend do you expect over the next 3–5 years?",
+    "What is the typical hospital decision-making timeline for purchasing a new robotic system?",
 ]
 
-INSIGHTS = {
-    "shared_themes": [
-        {
-            "category": "Shared theme",
-            "title": "Adoption is growing but uneven",
-            "explanation": "All three calls describe increasing adoption. Each also identifies uneven access or slower adoption outside larger or more advanced hospitals.",
-            "countries": ["France", "Germany", "United Kingdom"],
-            "ids": ["FR-00:18", "DE-00:16", "UK-00:14"],
-        },
-        {
-            "category": "Shared theme",
-            "title": "Economics and utilization shape approval",
-            "explanation": "France and Germany explicitly connect approval to economics and utilization. The UK also considers ROI, while balancing it with clinical and strategic factors.",
-            "countries": ["France", "Germany", "United Kingdom"],
-            "ids": ["FR-02:18", "DE-02:08", "UK-02:07"],
-        },
-        {
-            "category": "Shared theme",
-            "title": "Training affects utilization",
-            "explanation": "Each expert links training capacity to practical adoption. France and Germany directly connect the number of trained surgeons to utilization and the business case.",
-            "countries": ["France", "Germany", "United Kingdom"],
-            "ids": ["FR-03:10", "DE-03:05", "UK-01:05"],
-        },
-        {
-            "category": "Shared theme",
-            "title": "Growth continues, with different intensity",
-            "explanation": "France expects steady growth and Germany expects gradual growth. The UK is more positive and describes conditional acceleration if training expands.",
-            "countries": ["France", "Germany", "United Kingdom"],
-            "ids": ["FR-05:07", "DE-04:09", "UK-04:06"],
-        },
-    ],
-    "differences": [
-        {
-            "category": "Difference in emphasis",
-            "title": "Approval gate versus balanced strategy",
-            "explanation": "France and Germany present economics as a decisive approval gate. The UK expert instead describes economics and clinical strategy as balanced.",
-            "countries": ["France", "Germany", "United Kingdom"],
-            "ids": ["FR-04:08", "DE-02:08", "UK-03:10"],
-        },
-        {
-            "category": "Difference in emphasis",
-            "title": "Different barrier priorities",
-            "explanation": "France emphasizes capital approval, Germany emphasizes cost and sufficient utilization, and the UK gives training capacity equal importance with funding.",
-            "countries": ["France", "Germany", "United Kingdom"],
-            "ids": ["FR-01:20", "DE-01:10", "UK-01:05"],
-        },
-        {
-            "category": "Difference in emphasis",
-            "title": "Conditional optimism in the UK",
-            "explanation": "France and Germany describe steady or gradual growth. The UK expert is more optimistic, conditional on expanded training.",
-            "countries": ["France", "Germany", "United Kingdom"],
-            "ids": ["FR-05:07", "DE-04:09", "UK-04:06"],
-        },
-    ],
-}
+
+def current_evidence_fingerprint(session: Session) -> str:
+    rows = session.execute(
+        select(Transcript.id, Transcript.ingestion_hash).order_by(Transcript.id)
+    ).all()
+    payload = [{"id": row[0], "hash": row[1]} for row in rows]
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
 
 
-def get_guide(session: Session) -> dict:
-    output = []
-    for question in GUIDE:
+def market_rows(session: Session):
+    return session.scalars(select(Transcript).order_by(Transcript.market_name)).all()
+
+
+def build_guide_analysis(session: Session) -> dict:
+    retriever = HybridRetriever(session)
+    markets = market_rows(session)
+    questions = []
+
+    for index, question in enumerate(GUIDE_QUESTIONS, start=1):
         answers = []
-        for market_code, answer in question["answers"].items():
-            citations = get_citations(session, answer["ids"])
-            market = {
-                "FR": "France",
-                "DE": "Germany",
-                "UK": "United Kingdom",
-            }[market_code]
+        for transcript in markets:
+            evidence = retriever.retrieve(question, transcript_id=transcript.id, limit=4)
+            if not evidence:
+                answers.append(
+                    {
+                        "market_code": transcript.market_code,
+                        "market": transcript.market_name,
+                        "summary": f"No evidence for this question in the supplied {transcript.market_name} call.",
+                        "coverage": "insufficient",
+                        "citations": [],
+                    }
+                )
+                continue
+
+            coverage = (
+                "partial"
+                if any(item.incomplete_transcript for item in evidence)
+                else "sufficient"
+            )
+            summary = evidence[0].source_text
             answers.append(
                 {
-                    "market_code": market_code,
-                    "market": market,
-                    "summary": answer["summary"],
-                    "coverage": answer["coverage"],
-                    "citations": [item.model_dump() for item in citations],
+                    "market_code": transcript.market_code,
+                    "market": transcript.market_name,
+                    "summary": summary,
+                    "coverage": coverage,
+                    "citations": [
+                        citation_from_record(item).model_dump() for item in evidence
+                    ],
                 }
             )
-        output.append(
+
+        questions.append(
             {
-                "number": question["number"],
-                "question": question["question"],
+                "number": index,
+                "question": question,
                 "answers": answers,
             }
         )
-    return {"questions": output}
+
+    return {"questions": questions}
+
+
+def build_insights_analysis(session: Session) -> dict:
+    theme_queries = [
+        ("Adoption", "How would you describe current adoption of robotic surgery in your market?"),
+        ("Barriers", "What are the main barriers to adoption?"),
+        ("Economics", "How important are hospital budgets and ROI in purchasing decisions?"),
+        ("Training", "How important are surgeon training and clinical outcomes?"),
+        ("Outlook", "What adoption trend do you expect over the next 3–5 years?"),
+        ("Timeline", "What is the typical hospital decision-making timeline for purchasing a new robotic system?"),
+    ]
+
+    retriever = HybridRetriever(session)
+    shared_themes = []
+    differences = []
+
+    for label, query in theme_queries:
+        evidence = retriever.retrieve(query, limit=8)
+        if len(evidence) < 2:
+            continue
+
+        markets = sorted({item.market for item in evidence})
+        shared_themes.append(
+            {
+                "category": "Shared theme",
+                "title": label,
+                "explanation": f"Automatically derived evidence cluster for {label.lower()} across the available calls.",
+                "countries": markets,
+                "citations": [
+                    citation_from_record(item).model_dump() for item in evidence[:4]
+                ],
+            }
+        )
+
+        by_market = defaultdict(list)
+        for item in evidence:
+            by_market[item.market].append(item)
+
+        if len(by_market) >= 2:
+            differences.append(
+                {
+                    "category": "Difference in emphasis",
+                    "title": f"{label} emphasis varies by market",
+                    "explanation": f"Different calls emphasize different aspects of {label.lower()} based on their retrieved evidence.",
+                    "countries": sorted(by_market.keys()),
+                    "citations": [
+                        citation_from_record(items[0]).model_dump()
+                        for items in by_market.values()
+                    ],
+                }
+            )
+
+    return {
+        "shared_themes": shared_themes,
+        "differences": differences,
+    }
+
+
+def upsert_generated_analysis(
+    session: Session,
+    analysis_type: str,
+    analysis_key: str,
+    output: dict,
+    fingerprint: str,
+) -> None:
+    existing = session.scalar(
+        select(GeneratedAnalysis).where(
+            GeneratedAnalysis.analysis_type == analysis_type,
+            GeneratedAnalysis.analysis_key == analysis_key,
+        )
+    )
+
+    serialized = json.dumps(output)
+    if existing:
+        existing.output_json = serialized
+        existing.evidence_fingerprint = fingerprint
+    else:
+        session.add(
+            GeneratedAnalysis(
+                analysis_type=analysis_type,
+                analysis_key=analysis_key,
+                output_json=serialized,
+                evidence_fingerprint=fingerprint,
+            )
+        )
+
+
+def refresh_derived_analysis(session: Session) -> None:
+    fingerprint = current_evidence_fingerprint(session)
+    guide = build_guide_analysis(session)
+    insights = build_insights_analysis(session)
+
+    upsert_generated_analysis(session, "guide", "default", guide, fingerprint)
+    upsert_generated_analysis(session, "insights", "default", insights, fingerprint)
+
+
+def get_guide(session: Session) -> dict:
+    fingerprint = current_evidence_fingerprint(session)
+    cached = session.scalar(
+        select(GeneratedAnalysis).where(
+            GeneratedAnalysis.analysis_type == "guide",
+            GeneratedAnalysis.analysis_key == "default",
+        )
+    )
+    if cached and cached.evidence_fingerprint == fingerprint:
+        return json.loads(cached.output_json)
+
+    output = build_guide_analysis(session)
+    upsert_generated_analysis(session, "guide", "default", output, fingerprint)
+    session.commit()
+    return output
 
 
 def get_insights(session: Session) -> dict:
-    output: dict[str, list[dict]] = {}
-    for group, insights in INSIGHTS.items():
-        output[group] = []
-        for insight in insights:
-            citations = get_citations(session, insight["ids"])
-            output[group].append(
-                {
-                    **insight,
-                    "citations": [item.model_dump() for item in citations],
-                }
-            )
+    fingerprint = current_evidence_fingerprint(session)
+    cached = session.scalar(
+        select(GeneratedAnalysis).where(
+            GeneratedAnalysis.analysis_type == "insights",
+            GeneratedAnalysis.analysis_key == "default",
+        )
+    )
+    if cached and cached.evidence_fingerprint == fingerprint:
+        return json.loads(cached.output_json)
+
+    output = build_insights_analysis(session)
+    upsert_generated_analysis(session, "insights", "default", output, fingerprint)
+    session.commit()
     return output
 
 

@@ -724,7 +724,9 @@ async function renderStatus() {
       `<button class="button primary" id="refresh-data" type="button">${icon("refresh-cw")}Refresh data</button>`
     )}
     <dl class="status-list">
-      ${statusRow("Raw files detected", `${data.raw_files_detected} / 3`)}
+      ${statusRow("Raw files detected", data.raw_files_detected)}
+      ${statusRow("Valid raw files", data.valid_raw_files)}
+      ${statusRow("Invalid raw files", data.invalid_raw_files)}
       ${statusRow("Calls parsed", data.calls_parsed)}
       ${statusRow("Expert chunks indexed", data.expert_chunks_indexed)}
       ${statusRow("Incomplete transcripts", data.incomplete_transcripts)}
@@ -738,10 +740,43 @@ async function renderStatus() {
         ? `Active · ${state.credentials.model}`
         : "Not configured")}
       ${statusRow("Last ingestion", data.last_ingestion_time || "No completed ingestion")}
+      ${statusRow("Last startup action", data.last_ingestion_skipped ? "Skipped · corpus unchanged" : "Ingestion or refresh executed")}
+      ${statusRow("Corpus fingerprint", data.raw_corpus_fingerprint || "Not available")}
     </dl>
+
+    <div class="section-heading">
+      <h2>Raw file validation</h2>
+      <p>Every boot validates new transcript files before ingestion.</p>
+    </div>
+    <section class="table-card">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>Filename</th>
+            <th>Status</th>
+            <th>Market</th>
+            <th>Expert</th>
+            <th>Reason</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${data.raw_file_checks.map(item => `
+            <tr>
+              <td>${escapeHtml(item.filename)}</td>
+              <td>${item.valid
+                ? '<span class="status-badge success">Valid</span>'
+                : '<span class="status-badge warning">Invalid</span>'}</td>
+              <td>${escapeHtml(item.market_name || "—")}</td>
+              <td>${escapeHtml(item.expert_name || "—")}</td>
+              <td>${escapeHtml(item.reason || "Ready for ingestion")}</td>
+            </tr>
+          `).join("")}
+        </tbody>
+      </table>
+    </section>
+
     <div id="ingestion-result" style="margin-top:16px"></div>
   `;
-
   document.getElementById("refresh-data").addEventListener("click", async event => {
     const button = event.currentTarget;
     const result = document.getElementById("ingestion-result");
@@ -755,11 +790,13 @@ async function renderStatus() {
       state.transcripts = [];
       result.innerHTML = `
         <div class="card">
-          <span class="status-badge success">Ingestion completed</span>
+          <span class="status-badge ${response.skipped ? "neutral" : "success"}">
+            ${response.skipped ? "Ingestion skipped" : "Ingestion completed"}
+          </span>
           <p style="margin-top:12px">${escapeHtml(response.message)}</p>
           <p class="muted" style="margin-top:7px">
-            ${response.files_read} files · ${response.expert_turns_indexed} expert turns ·
-            ${response.vector_records_synchronized} vectors synchronized
+            ${response.files_discovered} discovered · ${response.valid_files} valid ·
+            ${response.invalid_files} invalid · ${response.vector_records_synchronized} vectors synchronized
           </p>
         </div>`;
       showToast("Data synchronized");

@@ -11,7 +11,7 @@ from backend.analysis_service import answer_question, get_guide, get_insights
 from backend.citation_service import get_citation
 from backend.config import settings
 from backend.database import get_db, init_db
-from backend.ingestion import TRANSCRIPT_FILES, run_ingestion
+from backend.ingestion import run_ingestion, collect_raw_file_checks
 from backend.models import IngestionRun, Transcript, TranscriptTurn
 from backend.schemas import (
     AnswerResponse,
@@ -24,10 +24,13 @@ from backend.schemas import (
     TurnResponse,
 )
 
-
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     init_db()
+    try:
+        run_ingestion(force=False)
+    except Exception:
+        pass
     yield
 
 
@@ -126,7 +129,11 @@ def insights(session: Session = Depends(get_db)):
 
 @app.get("/api/overview")
 def overview(session: Session = Depends(get_db)):
-    calls = session.scalar(select(func.count(Transcript.id))) or 0
+    transcript_rows = session.scalars(
+        select(Transcript).order_by(Transcript.market_name)
+    ).all()
+
+    calls = len(transcript_rows)
     moments = session.scalar(
         select(func.count(TranscriptTurn.id)).where(
             TranscriptTurn.is_expert_answer.is_(True)
@@ -136,9 +143,34 @@ def overview(session: Session = Depends(get_db)):
         select(func.count(Transcript.id)).where(Transcript.is_incomplete.is_(True))
     ) or 0
 
+    guide_data = get_guide(session)
+
+    question_map = {}
+    for item in guide_data["questions"]:
+        question_map[item["number"]] = item
+
+    def summary_for_market(market_name: str, question_number: int) -> str:
+        question = question_map.get(question_number)
+        if not question:
+            return "No evidence available."
+        for answer in question["answers"]:
+            if answer["market"] == market_name:
+                return answer["summary"]
+        return "No evidence available."
+
+    markets_summary = [
+        {
+            "market": row.market_name,
+            "adoption": summary_for_market(row.market_name, 1),
+            "focus": summary_for_market(row.market_name, 3),
+            "timeline": summary_for_market(row.market_name, 6),
+        }
+        for row in transcript_rows
+    ]
+
     return {
         "calls": calls,
-        "markets": ["France", "Germany", "United Kingdom"],
+        "markets": [item.market_name for item in transcript_rows],
         "expert_moments": moments,
         "incomplete_transcripts": incomplete,
         "source_integrity": "Timestamp-preserved source text",
@@ -147,43 +179,23 @@ def overview(session: Session = Depends(get_db)):
         "snapshots": [
             {
                 "title": "Adoption",
-                "text": "Growing across all three calls, with uneven access and slower adoption outside larger institutions.",
+                "text": "Guide answers are derived automatically from the current transcript corpus.",
             },
             {
                 "title": "Purchase drivers",
-                "text": "Economics, capital approval, utilization, and clinical strategy shape purchasing decisions.",
+                "text": "Economics, budgets, utilization, training, and clinical strategy are extracted from retrieved evidence.",
             },
             {
                 "title": "Training",
-                "text": "Training capacity affects utilization, operational adoption, and the business case.",
+                "text": "Training-related findings update automatically whenever new expert calls are ingested.",
             },
             {
                 "title": "Evidence gaps",
-                "text": "Germany and UK do not provide purchase timelines, and both sources end mid-sentence.",
+                "text": "Missing answers remain missing. The application does not invent unsupported details.",
             },
         ],
-        "markets_summary": [
-            {
-                "market": "France",
-                "adoption": "Growing",
-                "focus": "Capital approval and ROI",
-                "timeline": "6–12 months documented",
-            },
-            {
-                "market": "Germany",
-                "adoption": "Growing but uneven",
-                "focus": "Cost and utilization",
-                "timeline": "Not in supplied call",
-            },
-            {
-                "market": "United Kingdom",
-                "adoption": "Increasing",
-                "focus": "Funding and training capacity",
-                "timeline": "Not in supplied call",
-            },
-        ],
+        "markets_summary": markets_summary,
     }
-
 
 @app.post("/api/chat/all", response_model=AnswerResponse)
 def chat_all(request: ChatRequest, session: Session = Depends(get_db)):
@@ -228,12 +240,20 @@ def system_status(session: Session = Depends(get_db)):
     incomplete = session.scalar(
         select(func.count(Transcript.id)).where(Transcript.is_incomplete.is_(True))
     ) or 0
-    last_run = session.scalar(
+
+    last_completed_run = session.scalar(
         select(IngestionRun)
         .where(IngestionRun.status == "completed")
         .order_by(IngestionRun.completed_at.desc())
         .limit(1)
     )
+    latest_run = session.scalar(
+        select(IngestionRun)
+        .order_by(IngestionRun.started_at.desc())
+        .limit(1)
+    )
+
+    raw_file_checks, valid_files = collect_raw_file_checks()
 
     chroma_status = "Not initialized"
     try:
@@ -247,9 +267,9 @@ def system_status(session: Session = Depends(get_db)):
         pass
 
     return SystemStatus(
-        raw_files_detected=sum(
-            (settings.raw_path / filename).exists() for filename in TRANSCRIPT_FILES
-        ),
+        raw_files_detected=len(raw_file_checks),
+        valid_raw_files=len(valid_files),
+        invalid_raw_files=len(raw_file_checks) - len(valid_files),
         calls_parsed=calls,
         expert_chunks_indexed=chunks,
         sqlite_path=str(settings.database_path),
@@ -260,13 +280,20 @@ def system_status(session: Session = Depends(get_db)):
         gemini_configured=bool(settings.gemini_api_key),
         gemini_model=settings.gemini_model,
         last_ingestion_time=(
-            last_run.completed_at.isoformat()
-            if last_run and last_run.completed_at
+            last_completed_run.completed_at.isoformat()
+            if last_completed_run and last_completed_run.completed_at
             else None
         ),
         incomplete_transcripts=incomplete,
+        raw_corpus_fingerprint=(
+            last_completed_run.raw_corpus_fingerprint
+            if last_completed_run else None
+        ),
+        last_ingestion_skipped=bool(
+            latest_run and latest_run.message == "Raw corpus unchanged. Ingestion skipped."
+        ),
+        raw_file_checks=raw_file_checks,
     )
-
 
 @app.post("/api/ingest", response_model=IngestionResponse)
 def ingest():

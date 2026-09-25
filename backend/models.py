@@ -66,12 +66,15 @@ class IngestionRun(Base):
         DateTime(timezone=True), nullable=True
     )
     status: Mapped[str] = mapped_column(String(32), nullable=False)
+    raw_corpus_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    files_discovered: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    valid_files: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    invalid_files: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     files_processed: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     turns_indexed: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     vector_records: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     message: Mapped[str] = mapped_column(Text, nullable=False)
-
-
+    
 class GeneratedAnalysis(Base):
     __tablename__ = "generated_analyses"
 
