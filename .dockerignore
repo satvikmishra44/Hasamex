@@ -1,0 +1,53 @@
+# Git and IDE
+.git
+.gitignore
+.vscode
+.idea
+
+# Python environments and caches
+.venv
+venv
+env
+__pycache__
+*.py[cod]
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage
+htmlcov
+
+# Local environment credentials
+.env
+
+# Runtime-generated application data
+backend/data/app.db
+backend/data/app.db-shm
+backend/data/app.db-wal
+backend/data/chroma/*
+!backend/data/chroma/.gitkeep
+
+# Generated assets and screenshots
+screenshots/*
+!screenshots/.gitkeep
+
+# Common large folders / files accidentally placed in project
+node_modules
+dist
+build
+coverage
+*.log
+*.zip
+*.tar
+*.tar.gz
+*.iso
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.psd
+*.blend
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
